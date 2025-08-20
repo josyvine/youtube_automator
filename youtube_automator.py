@@ -6,31 +6,33 @@ import asyncio
 import js # Pyodide's bridge to JavaScript
 
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow # Changed from Flow to InstalledAppFlow for 'oob'
+from google_auth_oauthlib.flow import Flow # This was changed from InstalledAppFlow to match the Android redirect
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseUpload
 
 # ==============================================================================
 # CORRECTED FUNCTION: get_token_from_web_flow
-# This function has been rewritten to remove websockets and localhost.
+# This function has been updated to use the custom redirect URI from your Android app.
 # ==============================================================================
 async def get_token_from_web_flow(secrets_base64_string):
     """
-    Handles the Google OAuth flow in a WebView-compatible way.
-    It generates an auth URL, passes it to the app to open in a browser,
-    and then waits for the app to deliver the auth code back.
+    Handles the Google OAuth flow using a custom URI redirect for a WebView app.
     """
     try:
         # Step 1: Decode the secrets file data from base64
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
         
-        # Step 2: Create a flow with the 'out-of-band' redirect URI
-        flow = InstalledAppFlow.from_client_config(
+        # Step 2: Create a flow with the custom redirect URI that matches the Android app
+        # This redirect_uri MUST EXACTLY MATCH the one in your Google Cloud Console
+        # and correspond to the scheme/host in AndroidManifest.xml
+        redirect_uri = 'com.yourname.youtubesuite.oauth2:/callback'
+
+        flow = Flow.from_client_config(
             client_config,
             scopes=['https://www.googleapis.com/auth/youtube.upload'],
+            redirect_uri=redirect_uri
         )
-        flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
 
         # Step 3: Generate the authorization URL and tell JavaScript to open it
         auth_url, _ = flow.authorization_url(prompt='consent')
@@ -66,8 +68,8 @@ async def get_token_from_web_flow(secrets_base64_string):
         return None
 
 # ==============================================================================
-# UNCHANGED FUNCTION: upload_video
-# This function does not require changes as per the instructions.
+# ORIGINAL UNCHANGED FUNCTION: upload_video
+# This is your complete function, restored and untouched.
 # ==============================================================================
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
     """
