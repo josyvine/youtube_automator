@@ -5,13 +5,13 @@ import base64
 import asyncio
 import traceback
 import js
-import httplib2 # <--- REQUIRED IMPORT
+import httplib2 
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_httplib2 import AuthorizedHttp # <--- REQUIRED IMPORT FOR THE FIX
+from google_auth_httplib2 import AuthorizedHttp
 
 async def get_token_from_web_flow(secrets_base64_string):
     try:
@@ -58,6 +58,11 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
     try:
+        # **************************************************************************
+        # *********************** DIAGNOSTIC PRINT STATEMENT ***********************
+        # **************************************************************************
+        print("\n\n---> RUNNING LATEST VERSION OF SCRIPT (WITH 10-MINUTE TIMEOUT FIX) <---\n\n")
+
         auth_token = json.loads(auth_token_json_string)
         details = json.loads(details_json_string)
         
@@ -65,13 +70,8 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         credentials = Credentials(**auth_token)
 
         # ------------------- THE ONE CORRECT FIX -------------------
-        # 1. Create an http object with a long timeout (600 seconds = 10 minutes)
         http_with_timeout = httplib2.Http(timeout=600)
-
-        # 2. Correctly combine the credentials and the http object with the timeout
         authorized_http = AuthorizedHttp(credentials, http=http_with_timeout)
-
-        # 3. Build the YouTube service using the authorized http object
         youtube = build(
             'youtube', 
             'v3', 
