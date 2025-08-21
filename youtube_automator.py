@@ -5,7 +5,8 @@ import base64
 import asyncio
 import traceback
 import js
-import httplib2 # <-- REQUIRED IMPORT FOR THE FIX
+import httplib2
+import google_auth_httplib2 # <-- NEW REQUIRED IMPORT FOR THE FINAL FIX
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -57,7 +58,7 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 
 # ==============================================================================
-# THIS IS THE CORRECTED UPLOAD FUNCTION
+# THIS IS THE FINAL, CORRECTED UPLOAD FUNCTION
 # ==============================================================================
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
     try:
@@ -67,20 +68,21 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         print("--> Initializing YouTube API client...")
         credentials = Credentials(**auth_token)
 
-        # ------------------- THIS IS THE FIX -------------------
-        # 1. Create a custom httplib2.Http object with a long timeout.
-        #    600 seconds = 10 minutes. This prevents the TimeoutError.
+        # ------------------- THIS IS THE FINAL, CORRECTED FIX -------------------
+        # 1. Create a httplib2.Http object with a long timeout (10 minutes)
         http_with_timeout = httplib2.Http(timeout=600)
 
-        # 2. Build the YouTube service object, passing in our custom http client.
-        #    The credentials object authorizes our custom client.
+        # 2. Use google_auth_httplib2.AuthorizedHttp to properly combine
+        #    the credentials with our custom http client. THIS IS THE CORRECT METHOD.
+        authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http_with_timeout)
+
+        # 3. Build the YouTube service object, passing in the fully authorized http client.
         youtube = build(
             'youtube', 
             'v3', 
-            credentials=credentials, 
-            http=credentials.authorize(http_with_timeout)
+            http=authed_http
         )
-        # ----------------- END OF FIX -----------------
+        # ----------------- END OF FINAL FIX -----------------
         
         print("--> YouTube client created successfully.")
 
@@ -105,7 +107,7 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         media = MediaIoBaseUpload(
             video_file, 
             mimetype='video/*', 
-            chunksize=10*1024*1024, # Using a reasonable chunk size for better reliability 
+            chunksize=10*1024*1024,
             resumable=True
         )
 
