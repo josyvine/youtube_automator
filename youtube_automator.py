@@ -17,21 +17,29 @@ async def get_token_from_web_flow(secrets_base64_string):
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
+        
         redirect_uri = 'http://localhost'
+
         flow = InstalledAppFlow.from_client_config(
             client_config,
             scopes=['https://www.googleapis.com/auth/youtube.upload'],
             redirect_uri=redirect_uri
         )
+
         auth_url, _ = flow.authorization_url(prompt='consent')
         js.open_auth_url_in_browser(auth_url)
+        
         print("--> Waiting for authorization code from the app...")
         auth_code = await js.waitForAuthCode()
+
         if not auth_code or auth_code.strip() == "":
             raise Exception("Authorization code was not received or was empty.")
+
         print("--> Authorization code received. Fetching token...")
+        
         flow.fetch_token(code=auth_code)
         creds = flow.credentials
+        
         return json.dumps({
             'token': creds.token,
             'refresh_token': creds.refresh_token,
@@ -40,29 +48,37 @@ async def get_token_from_web_flow(secrets_base64_string):
             'client_secret': creds.client_secret,
             'scopes': creds.scopes
         })
+        
     except Exception as e:
         print(f"\n❌ A detailed error occurred in the Python authentication flow:")
         traceback.print_exc()
         js.deliverAuthCodeToWeb(None) 
         return None
 
+
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
     try:
+        # **************************************************************************
+        # *********************** DIAGNOSTIC PRINT STATEMENT ***********************
+        # **************************************************************************
+        print("\n\n---> RUNNING LATEST VERSION OF SCRIPT (WITH 10-MINUTE TIMEOUT FIX) <---\n\n")
+
         auth_token = json.loads(auth_token_json_string)
         details = json.loads(details_json_string)
         
-        print("--> Initializing YouTube API client with custom timeout...")
+        print("--> Initializing YouTube API client...")
         credentials = Credentials(**auth_token)
 
-        # --- THE ORIGINAL, CORRECT TIMEOUT FIX ---
-        # 1. Create the http object with the long timeout.
+        # ------------------- THE ONE CORRECT FIX -------------------
         http_with_timeout = httplib2.Http(timeout=600)
-        # 2. Correctly combine credentials and the http object with the timeout.
         authorized_http = AuthorizedHttp(credentials, http=http_with_timeout)
-        # 3. Build the YouTube service using our fully authorized http object.
-        youtube = build( 'youtube', 'v3', http=authorized_http )
-        # --- END OF FIX ---
-        
+        youtube = build(
+            'youtube', 
+            'v3', 
+            http=authorized_http
+        )
+        # ----------------------- END OF FIX ------------------------
+
         print("--> YouTube client created successfully.")
 
         body = {
@@ -71,7 +87,9 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
                 'description': details.get('description', 'Default Description'),
                 'categoryId': '22'
             },
-            'status': { 'privacyStatus': details.get('privacy', 'private') }
+            'status': {
+                'privacyStatus': details.get('privacy', 'private')
+            }
         }
         print(f"--> Video Title: {details.get('title')}")
         print(f"--> Privacy Status: {details.get('privacy')}")
@@ -81,11 +99,10 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         video_file = io.BytesIO(video_bytes)
         print("--> Video data ready for upload.")
         
-        # Use a smaller chunk size for added reliability on any network
         media = MediaIoBaseUpload(
             video_file, 
             mimetype='video/*', 
-            chunksize=1*1024*1024,
+            chunksize=10*1024*1024,
             resumable=True
         )
 
