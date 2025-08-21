@@ -5,13 +5,13 @@ import base64
 import asyncio
 import traceback
 import js
-import httplib2 
+import httplib2 # <--- REQUIRED IMPORT
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_httplib2 import AuthorizedHttp # <-- THE CORRECT IMPORT FOR THE FIX
+from google_auth_httplib2 import AuthorizedHttp # <--- REQUIRED IMPORT FOR THE FIX
 
 async def get_token_from_web_flow(secrets_base64_string):
     try:
@@ -61,25 +61,24 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         auth_token = json.loads(auth_token_json_string)
         details = json.loads(details_json_string)
         
-        print("--> Initializing YouTube API client with custom timeout...")
+        print("--> Initializing YouTube API client...")
         credentials = Credentials(**auth_token)
 
-        # --- THIS IS THE CORRECTED AND FINAL FIX ---
-        # 1. Create the http object with the long timeout.
+        # ------------------- THE ONE CORRECT FIX -------------------
+        # 1. Create an http object with a long timeout (600 seconds = 10 minutes)
         http_with_timeout = httplib2.Http(timeout=600)
 
-        # 2. Use AuthorizedHttp to correctly combine credentials and the http object.
-        #    This replaces the broken `credentials.authorize()` call.
+        # 2. Correctly combine the credentials and the http object with the timeout
         authorized_http = AuthorizedHttp(credentials, http=http_with_timeout)
 
-        # 3. Build the YouTube service using our fully authorized http object.
+        # 3. Build the YouTube service using the authorized http object
         youtube = build(
             'youtube', 
             'v3', 
             http=authorized_http
         )
-        # --- END OF FIX ---
-        
+        # ----------------------- END OF FIX ------------------------
+
         print("--> YouTube client created successfully.")
 
         body = {
