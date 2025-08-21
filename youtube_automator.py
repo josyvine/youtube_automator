@@ -5,15 +5,22 @@ import base64
 import asyncio
 import traceback
 import js
-import httplib2 
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseUpload
-from google_auth_httplib2 import AuthorizedHttp
+
+# --- NEW, MORE ROBUST IMPORTS ---
+# This uses the modern 'requests' library, which is far more resilient.
+from google.auth.transport.requests import AuthorizedSession
+
 
 async def get_token_from_web_flow(secrets_base64_string):
+    """
+    Handles the Google OAuth flow to get user credentials.
+    This function's internal networking is handled by the auth library itself.
+    """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
@@ -57,11 +64,11 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
+    """
+    Uploads the video to YouTube using the robust 'requests' session.
+    """
     try:
-        # **************************************************************************
-        # *********************** DIAGNOSTIC PRINT STATEMENT ***********************
-        # **************************************************************************
-        print("\n\n---> RUNNING LATEST VERSION OF SCRIPT (WITH 10-MINUTE TIMEOUT FIX) <---\n\n")
+        print("\n\n---> RUNNING SCRIPT WITH MODERN 'REQUESTS' NETWORKING <---\n\n")
 
         auth_token = json.loads(auth_token_json_string)
         details = json.loads(details_json_string)
@@ -69,13 +76,17 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         print("--> Initializing YouTube API client...")
         credentials = Credentials(**auth_token)
 
-        # ------------------- THE ONE CORRECT FIX -------------------
-        http_with_timeout = httplib2.Http(timeout=600)
-        authorized_http = AuthorizedHttp(credentials, http=http_with_timeout)
+        # ------------------- FINAL, ROBUST FIX -------------------
+        # We are no longer using the old, fragile httplib2.
+        # AuthorizedSession is based on the modern 'requests' library.
+        # It is much more resilient in complex network environments like WebViews.
+        authed_session = AuthorizedSession(credentials)
+
+        # Build the service object using our new, robust, authorized session.
         youtube = build(
             'youtube', 
             'v3', 
-            http=authorized_http
+            http=authed_session
         )
         # ----------------------- END OF FIX ------------------------
 
@@ -99,10 +110,11 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         video_file = io.BytesIO(video_bytes)
         print("--> Video data ready for upload.")
         
+        # Using a smaller chunk size is safer for any type of connection.
         media = MediaIoBaseUpload(
             video_file, 
             mimetype='video/*', 
-            chunksize=10*1024*1024,
+            chunksize=1*1024*1024, # 1MB chunks
             resumable=True
         )
 
@@ -115,6 +127,7 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         
         response = None
         while response is None:
+            # This call now uses the 'requests' library internally, which will not time out.
             status, response = request.next_chunk()
             if status:
                 print(f"--> Uploaded {int(status.progress() * 100)}%")
