@@ -26,7 +26,7 @@ async def get_token_from_web_flow(secrets_base64_string):
         )
 
         auth_url, _ = flow.authorization_url(prompt='consent')
-        open_auth_url_in_browser(auth_url)
+        js.open_auth_url_in_browser(auth_url)
         
         print("--> Waiting for authorization code from the app...")
         auth_code = await js.waitForAuthCode()
