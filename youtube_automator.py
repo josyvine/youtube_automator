@@ -5,6 +5,7 @@ import base64
 import asyncio
 import traceback
 import js
+import httplib2 # <-- REQUIRED IMPORT FOR THE FIX
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -55,6 +56,9 @@ async def get_token_from_web_flow(secrets_base64_string):
         return None
 
 
+# ==============================================================================
+# THIS IS THE CORRECTED UPLOAD FUNCTION
+# ==============================================================================
 def upload_video(auth_token_json_string, video_base64_string, details_json_string):
     try:
         auth_token = json.loads(auth_token_json_string)
@@ -62,7 +66,22 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         
         print("--> Initializing YouTube API client...")
         credentials = Credentials(**auth_token)
-        youtube = build('youtube', 'v3', credentials=credentials)
+
+        # ------------------- THIS IS THE FIX -------------------
+        # 1. Create a custom httplib2.Http object with a long timeout.
+        #    600 seconds = 10 minutes. This prevents the TimeoutError.
+        http_with_timeout = httplib2.Http(timeout=600)
+
+        # 2. Build the YouTube service object, passing in our custom http client.
+        #    The credentials object authorizes our custom client.
+        youtube = build(
+            'youtube', 
+            'v3', 
+            credentials=credentials, 
+            http=credentials.authorize(http_with_timeout)
+        )
+        # ----------------- END OF FIX -----------------
+        
         print("--> YouTube client created successfully.")
 
         body = {
@@ -83,7 +102,12 @@ def upload_video(auth_token_json_string, video_base64_string, details_json_strin
         video_file = io.BytesIO(video_bytes)
         print("--> Video data ready for upload.")
         
-        media = MediaIoBaseUpload(video_file, mimetype='video/*', chunksize=-1, resumable=True)
+        media = MediaIoBaseUpload(
+            video_file, 
+            mimetype='video/*', 
+            chunksize=10*1024*1024, # Using a reasonable chunk size for better reliability 
+            resumable=True
+        )
 
         print("--> Starting video upload to YouTube. This may take a while...")
         request = youtube.videos().insert(
