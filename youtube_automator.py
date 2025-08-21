@@ -7,7 +7,7 @@ import traceback
 import js
 
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import Flow
+from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -17,9 +17,9 @@ async def get_token_from_web_flow(secrets_base64_string):
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
         
-        redirect_uri = 'com.yourname.youtubesuite.oauth2://callback'
+        redirect_uri = 'http://localhost'
 
-        flow = Flow.from_client_config(
+        flow = InstalledAppFlow.from_client_config(
             client_config,
             scopes=['https://www.googleapis.com/auth/youtube.upload'],
             redirect_uri=redirect_uri
