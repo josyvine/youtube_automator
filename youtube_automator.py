@@ -1,13 +1,13 @@
-# --- START OF CORRECTED youtube_automator.py ---
+# --- START OF new youtube_automator.py ---
 
 import json
 import base64
 import traceback
 import js
-import asyncio  # Import asyncio for handling asynchronous operations
+import asyncio  # This is required for async operations
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# The function must be declared as 'async' to use 'await'
+# The function must be async to handle await
 async def get_token_from_web_flow(secrets_base64_string):
     """
     Handles the Google OAuth2 flow to get user credentials.
@@ -17,9 +17,14 @@ async def get_token_from_web_flow(secrets_base64_string):
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
         
+        # <<< INSTRUCTION #2 FIX APPLIED HERE
+        # Added 'youtube.readonly' scope, which is required for the connection test.
         flow = InstalledAppFlow.from_client_config(
             client_config,
-            scopes=['https://www.googleapis.com/auth/youtube.upload'],
+            scopes=[
+                'https://www.googleapis.com/auth/youtube.upload',
+                'https://www.googleapis.com/auth/youtube.readonly'
+            ],
             redirect_uri='http://localhost' # A placeholder for the web flow
         )
 
@@ -27,18 +32,14 @@ async def get_token_from_web_flow(secrets_base64_string):
         js.open_auth_url_in_browser(auth_url)
         
         print("--> Waiting for authorization code from the app...")
-        
-        # FIX #1: You must 'await' the result from the JavaScript Promise/PyodideFuture.
-        # This pauses the code until the user enters the code in the terminal.
+        # This MUST be awaited to get the result from JavaScript
         auth_code = await js.waitForAuthCode()
 
         if not auth_code or auth_code.strip() == "":
             raise Exception("Authorization code was not received or was empty.")
 
         print("--> Authorization code received. Fetching token...")
-        
-        # FIX #2: In Pyodide, blocking network calls must also be awaited.
-        # We run it in a separate thread via asyncio.to_thread to prevent the UI from freezing.
+        # This network call MUST be awaited in an async environment
         await asyncio.to_thread(flow.fetch_token, code=auth_code)
         
         creds = flow.credentials
@@ -84,4 +85,4 @@ def prepare_upload_data(auth_token_json_string, details_json_string):
         traceback.print_exc()
         return None
 
-# --- END OF CORRECTED youtube_automator.py ---
+# --- END OF new youtube_automator.py ---
