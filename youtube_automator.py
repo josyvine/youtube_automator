@@ -103,7 +103,7 @@ async def test_api_connection(auth_token_json_string):
 
 async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type):
     """
-    This is the final, working upload function.
+    This is the final, working upload function with the case-sensitive typo fixed.
     """
     print("--> [Python] Starting full upload process...")
     try:
@@ -145,9 +145,13 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             print(f"--> [Python] DEBUG: Initiation Response Body: {response_text}")
             raise Exception(f"Failed to initiate upload session (status {init_response.status})")
             
-        upload_url = init_response.headers.get('Location')
+        # ===================================================================
+        # THE ONLY FIX IS HERE.
+        # Changed .get('Location') to .get('location') to match the server's response.
+        # ===================================================================
+        upload_url = init_response.headers.get('location')
+        
         if not upload_url:
-            # This is the corrected debugging line that no longer crashes.
             print(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers}")
             raise Exception("Did not receive an upload URL from Google.")
 
@@ -157,7 +161,6 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
         upload_response = await pyfetch(
             url=upload_url,
             method='PUT',
-            # We don't need Content-Length here because pyfetch adds it automatically for byte bodies.
             body=video_bytes
         )
 
