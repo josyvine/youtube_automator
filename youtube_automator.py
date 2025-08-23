@@ -1,4 +1,4 @@
-# --- START OF FINAL, DEFINITIVE youtube_automator.py ---
+# --- START OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
 
 import json
 import base64
@@ -7,12 +7,8 @@ import js
 import asyncio
 import io
 
-# Pyodide doesn't have these by default, so we import them this way
 from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
-
-# We NO LONGER use the 'build' function from googleapiclient.discovery
-# as it is tied to the broken httplib2. We will make requests manually.
 
 async def get_token_from_web_flow(secrets_base64_string):
     """
@@ -78,7 +74,7 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 async def test_api_connection(auth_token_json_string):
     """
-    FIXED: Tests the connection using pyfetch, bypassing the broken httplib2.
+    Tests the connection using pyfetch. (This part works and is unchanged).
     """
     print("--> [Python] Running connection test...")
     try:
@@ -126,6 +122,15 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             }
         }
 
+        # ===================================================================
+        # THE ONLY FIX IS HERE.
+        # We decode the video FIRST to get its size, and then we add that
+        # size to the initial request header so Google knows what to expect.
+        # ===================================================================
+        print("--> [Python] Decoding Base64 video data to get size...")
+        video_bytes = base64.b64decode(video_base64_string)
+        video_size = len(video_bytes)
+
         # 2. Start the resumable upload session
         print("--> [Python] Initializing resumable upload session...")
         init_response = await pyfetch(
@@ -134,7 +139,8 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             headers={
                 'Authorization': f'Bearer {access_token}',
                 'Content-Type': 'application/json; charset=UTF-8',
-                'X-Upload-Content-Type': 'video/*'
+                'X-Upload-Content-Type': 'video/*',
+                'X-Upload-Content-Length': str(video_size) # <-- THE CRITICAL FIX
             },
             body=json.dumps(metadata_body)
         )
@@ -149,17 +155,11 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
         print(f"--> [Python] Session initiated. Uploading to: {upload_url[:30]}...")
 
         # 3. Upload the actual video file content
-        print("--> [Python] Decoding Base64 video data...")
-        video_bytes = base64.b64decode(video_base64_string)
-        
-        print(f"--> [Python] Uploading {len(video_bytes) / (1024*1024):.2f} MB of video data...")
+        print(f"--> [Python] Uploading {video_size / (1024*1024):.2f} MB of video data...")
         upload_response = await pyfetch(
             url=upload_url,
             method='PUT',
-            headers={
-                'Content-Type': 'video/*',
-                'Content-Length': str(len(video_bytes))
-            },
+            headers={ 'Content-Length': str(video_size) },
             body=video_bytes
         )
 
@@ -173,4 +173,4 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
         print("\n❌ [Python] FATAL ERROR during upload:")
         traceback.print_exc()
 
-# --- END OF FINAL, DEFINITIVE youtube_automator.py ---
+# --- END OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
