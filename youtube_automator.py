@@ -1,4 +1,4 @@
-# --- START OF FINAL, COMPLETE youtube_automator.py ---
+# --- START OF FINAL, DEFINITIVE youtube_automator.py ---
 
 import json
 import base64
@@ -10,19 +10,18 @@ import io
 # Pyodide doesn't have these by default, so we import them this way
 from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+
+# We NO LONGER use the 'build' function from googleapiclient.discovery
+# as it is tied to the broken httplib2. We will make requests manually.
 
 async def get_token_from_web_flow(secrets_base64_string):
     """
-    Handles the Google OAuth2 flow to get user credentials.
+    Handles the Google OAuth2 flow to get user credentials. (This part works and is unchanged).
     """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
         
-        # We must use a custom flow for Pyodide as InstalledAppFlow is not fully compatible
-        # This part remains mostly the same, but it's important to understand the context
         scopes = [
             'https://www.googleapis.com/auth/youtube.upload',
             'https://www.googleapis.com/auth/youtube.readonly'
@@ -79,22 +78,26 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 async def test_api_connection(auth_token_json_string):
     """
-    Tests the connection to the YouTube API directly from Python.
+    FIXED: Tests the connection using pyfetch, bypassing the broken httplib2.
     """
     print("--> [Python] Running connection test...")
     try:
         creds_data = json.loads(auth_token_json_string)
-        credentials = Credentials(**creds_data)
+        access_token = creds_data['token']
         
-        # The 'build' function is blocking, so we run it in a thread
-        youtube = await asyncio.to_thread(build, 'youtube', 'v3', credentials=credentials)
+        print("--> [Python] Attempting to fetch channel info using pyfetch...")
+        response = await pyfetch(
+            url='https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+            method='GET',
+            headers={ 'Authorization': f'Bearer {access_token}' }
+        )
         
-        print("--> [Python] Attempting to fetch channel info...")
-        # The 'execute' function is also blocking
-        request = youtube.channels().list(part='snippet', mine=True)
-        response = await asyncio.to_thread(request.execute)
+        if not response.ok:
+             raise Exception(f"API request failed with status {response.status}: {await response.string()}")
 
-        channel_title = response['items'][0]['snippet']['title']
+        data = await response.json()
+        channel_title = data['items'][0]['snippet']['title']
+        
         print(f"\n✅ SUCCESS: Connection to Google API is working!")
         print(f"--> Successfully fetched info for channel: {channel_title}")
 
@@ -104,57 +107,70 @@ async def test_api_connection(auth_token_json_string):
 
 async def upload_video(auth_token_json_string, details_json_string, video_base64_string):
     """
-    Handles the entire video upload process within Pyodide.
+    FIXED: Handles the entire video upload process using pyfetch for resumable uploads.
     """
     print("--> [Python] Starting full upload process...")
     try:
-        # 1. Prepare credentials and YouTube service object
+        # 1. Prepare credentials and data
         creds_data = json.loads(auth_token_json_string)
-        credentials = Credentials(**creds_data)
-        youtube = await asyncio.to_thread(build, 'youtube', 'v3', credentials=credentials)
-
-        # 2. Prepare video data
-        print("--> [Python] Decoding Base64 video data...")
-        video_bytes = base64.b64decode(video_base64_string)
-        video_file = io.BytesIO(video_bytes)
+        access_token = creds_data['token']
         
-        # 3. Prepare metadata
         details = json.loads(details_json_string)
-        body = {
+        metadata_body = {
             'snippet': {
                 'title': details['title'],
                 'description': details['description'],
-                'tags': details.get('tags', []),
-                'categoryId': details.get('categoryId', '22')
             },
             'status': {
                 'privacyStatus': details['privacy']
             }
         }
 
-        # 4. Create the resumable upload object
-        media = MediaIoBaseUpload(video_file, mimetype='application/octet-stream', chunksize=1024*1024, resumable=True)
+        # 2. Start the resumable upload session
+        print("--> [Python] Initializing resumable upload session...")
+        init_response = await pyfetch(
+            url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+            method='POST',
+            headers={
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json; charset=UTF-8',
+                'X-Upload-Content-Type': 'video/*'
+            },
+            body=json.dumps(metadata_body)
+        )
         
-        print("--> [Python] Initializing upload request...")
-        request = youtube.videos().insert(
-            part=",".join(body.keys()),
-            body=body,
-            media_body=media
+        if not init_response.ok:
+            raise Exception(f"Failed to initiate upload session: {await init_response.string()}")
+            
+        upload_url = init_response.headers.get('Location')
+        if not upload_url:
+            raise Exception("Did not receive an upload URL from Google.")
+
+        print(f"--> [Python] Session initiated. Uploading to: {upload_url[:30]}...")
+
+        # 3. Upload the actual video file content
+        print("--> [Python] Decoding Base64 video data...")
+        video_bytes = base64.b64decode(video_base64_string)
+        
+        print(f"--> [Python] Uploading {len(video_bytes) / (1024*1024):.2f} MB of video data...")
+        upload_response = await pyfetch(
+            url=upload_url,
+            method='PUT',
+            headers={
+                'Content-Type': 'video/*',
+                'Content-Length': str(len(video_bytes))
+            },
+            body=video_bytes
         )
 
-        # 5. Execute the upload in chunks and report progress
-        response = None
-        while response is None:
-            # Run the blocking network call in a thread
-            status, response = await asyncio.to_thread(request.next_chunk)
-            if status:
-                progress = int(status.progress() * 100)
-                print(f"--> [Python] Upload Progress: {progress}%")
+        if not upload_response.ok:
+             raise Exception(f"Video upload failed with status {upload_response.status}: {await upload_response.string()}")
 
-        print("\n✅ SUCCESS! Video uploaded with ID:", response.get('id'))
+        final_data = await upload_response.json()
+        print("\n✅ SUCCESS! Video uploaded with ID:", final_data.get('id'))
 
     except Exception as e:
-        print("\n❌ [Python] FATAL ERROR during native upload:")
+        print("\n❌ [Python] FATAL ERROR during upload:")
         traceback.print_exc()
 
-# --- END OF FINAL, COMPLETE youtube_automator.py ---
+# --- END OF FINAL, DEFINITIVE youtube_automator.py ---
