@@ -1,50 +1,68 @@
-# --- START OF new youtube_automator.py ---
+# --- START OF FINAL, COMPLETE youtube_automator.py ---
 
 import json
 import base64
 import traceback
 import js
-import asyncio  # This is required for async operations
-from google_auth_oauthlib.flow import InstalledAppFlow
+import asyncio
+import io
 
-# The function must be async to handle await
+# Pyodide doesn't have these by default, so we import them this way
+from pyodide.http import pyfetch
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+
 async def get_token_from_web_flow(secrets_base64_string):
     """
     Handles the Google OAuth2 flow to get user credentials.
-    This part runs in the Pyodide terminal.
     """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
         
-        # <<< INSTRUCTION #2 FIX APPLIED HERE
-        # Added 'youtube.readonly' scope, which is required for the connection test.
-        flow = InstalledAppFlow.from_client_config(
-            client_config,
-            scopes=[
-                'https://www.googleapis.com/auth/youtube.upload',
-                'https://www.googleapis.com/auth/youtube.readonly'
-            ],
-            redirect_uri='http://localhost' # A placeholder for the web flow
-        )
-
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        js.open_auth_url_in_browser(auth_url)
+        # We must use a custom flow for Pyodide as InstalledAppFlow is not fully compatible
+        # This part remains mostly the same, but it's important to understand the context
+        scopes = [
+            'https://www.googleapis.com/auth/youtube.upload',
+            'https://www.googleapis.com/auth/youtube.readonly'
+        ]
         
+        auth_uri = client_config['installed']['auth_uri']
+        client_id = client_config['installed']['client_id']
+        token_uri = client_config['installed']['token_uri']
+        client_secret = client_config['installed']['client_secret']
+        
+        auth_url = (f"{auth_uri}?client_id={client_id}&redirect_uri=http://localhost"
+                    f"&response_type=code&scope={' '.join(scopes)}&access_type=offline")
+
+        js.open_auth_url_in_browser(auth_url)
         print("--> Waiting for authorization code from the app...")
-        # This MUST be awaited to get the result from JavaScript
         auth_code = await js.waitForAuthCode()
 
         if not auth_code or auth_code.strip() == "":
             raise Exception("Authorization code was not received or was empty.")
 
         print("--> Authorization code received. Fetching token...")
-        # This network call MUST be awaited in an async environment
-        await asyncio.to_thread(flow.fetch_token, code=auth_code)
         
-        creds = flow.credentials
+        response = await pyfetch(
+            url=token_uri,
+            method='POST',
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            body=(f"code={auth_code}&client_id={client_id}&client_secret={client_secret}"
+                  f"&redirect_uri=http://localhost&grant_type=authorization_code")
+        )
+        token_data = await response.json()
         
-        # Return the complete credentials as a JSON string
+        creds = Credentials(
+            token=token_data['access_token'],
+            refresh_token=token_data.get('refresh_token'),
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes
+        )
+        
         return json.dumps({
             'token': creds.token,
             'refresh_token': creds.refresh_token,
@@ -59,30 +77,84 @@ async def get_token_from_web_flow(secrets_base64_string):
         traceback.print_exc()
         return None
 
-def prepare_upload_data(auth_token_json_string, details_json_string):
+async def test_api_connection(auth_token_json_string):
     """
-    Takes the token and video details and combines them into a single JSON "work order"
-    to be passed to the native Android uploader. This does NOT upload the video.
+    Tests the connection to the YouTube API directly from Python.
     """
-    print("--> [Pyodide] Preparing token and metadata for native handoff...")
+    print("--> [Python] Running connection test...")
     try:
-        # Load the JSON strings into Python dictionaries
-        auth_token = json.loads(auth_token_json_string)
-        details = json.loads(details_json_string)
-
-        # Combine everything into one package for the Java code
-        upload_package = {
-            "credentials": auth_token,
-            "metadata": details
-        }
+        creds_data = json.loads(auth_token_json_string)
+        credentials = Credentials(**creds_data)
         
-        print("--> [Pyodide] Data package is ready for handoff.")
-        # Return the combined data as a single JSON string
-        return json.dumps(upload_package)
+        # The 'build' function is blocking, so we run it in a thread
+        youtube = await asyncio.to_thread(build, 'youtube', 'v3', credentials=credentials)
+        
+        print("--> [Python] Attempting to fetch channel info...")
+        # The 'execute' function is also blocking
+        request = youtube.channels().list(part='snippet', mine=True)
+        response = await asyncio.to_thread(request.execute)
+
+        channel_title = response['items'][0]['snippet']['title']
+        print(f"\n✅ SUCCESS: Connection to Google API is working!")
+        print(f"--> Successfully fetched info for channel: {channel_title}")
 
     except Exception as e:
-        print(f"\n❌ An error occurred while preparing data in Python:")
+        print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
-        return None
 
-# --- END OF new youtube_automator.py ---
+async def upload_video(auth_token_json_string, details_json_string, video_base64_string):
+    """
+    Handles the entire video upload process within Pyodide.
+    """
+    print("--> [Python] Starting full upload process...")
+    try:
+        # 1. Prepare credentials and YouTube service object
+        creds_data = json.loads(auth_token_json_string)
+        credentials = Credentials(**creds_data)
+        youtube = await asyncio.to_thread(build, 'youtube', 'v3', credentials=credentials)
+
+        # 2. Prepare video data
+        print("--> [Python] Decoding Base64 video data...")
+        video_bytes = base64.b64decode(video_base64_string)
+        video_file = io.BytesIO(video_bytes)
+        
+        # 3. Prepare metadata
+        details = json.loads(details_json_string)
+        body = {
+            'snippet': {
+                'title': details['title'],
+                'description': details['description'],
+                'tags': details.get('tags', []),
+                'categoryId': details.get('categoryId', '22')
+            },
+            'status': {
+                'privacyStatus': details['privacy']
+            }
+        }
+
+        # 4. Create the resumable upload object
+        media = MediaIoBaseUpload(video_file, mimetype='application/octet-stream', chunksize=1024*1024, resumable=True)
+        
+        print("--> [Python] Initializing upload request...")
+        request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media
+        )
+
+        # 5. Execute the upload in chunks and report progress
+        response = None
+        while response is None:
+            # Run the blocking network call in a thread
+            status, response = await asyncio.to_thread(request.next_chunk)
+            if status:
+                progress = int(status.progress() * 100)
+                print(f"--> [Python] Upload Progress: {progress}%")
+
+        print("\n✅ SUCCESS! Video uploaded with ID:", response.get('id'))
+
+    except Exception as e:
+        print("\n❌ [Python] FATAL ERROR during native upload:")
+        traceback.print_exc()
+
+# --- END OF FINAL, COMPLETE youtube_automator.py ---
