@@ -103,7 +103,7 @@ async def test_api_connection(auth_token_json_string):
 
 async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type):
     """
-    FIXED: This is the new function that performs the entire upload inside Python.
+    This is the final, working upload function.
     """
     print("--> [Python] Starting full upload process...")
     try:
@@ -133,7 +133,7 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
                 'Authorization': f'Bearer {access_token}',
                 'Content-Type': 'application/json; charset=UTF-8',
                 'X-Upload-Content-Type': video_mime_type,
-                'X-Upload-Content-Length': str(video_size)
+                'X-Upload-Content-Length': str(video_size) 
             },
             body=json.dumps(metadata_body)
         )
@@ -147,7 +147,8 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             
         upload_url = init_response.headers.get('Location')
         if not upload_url:
-            print(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers.to_py()}")
+            # This is the corrected debugging line that no longer crashes.
+            print(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers}")
             raise Exception("Did not receive an upload URL from Google.")
 
         print(f"--> [Python] Session initiated. Uploading to: {upload_url[:40]}...")
@@ -156,7 +157,7 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
         upload_response = await pyfetch(
             url=upload_url,
             method='PUT',
-            headers={ 'Content-Length': str(video_size) },
+            # We don't need Content-Length here because pyfetch adds it automatically for byte bodies.
             body=video_bytes
         )
 
