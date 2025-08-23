@@ -1,4 +1,4 @@
-# --- START OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
+# --- START OF FINAL, UPDATED youtube_automator.py ---
 
 import json
 import base64
@@ -12,7 +12,7 @@ from google.oauth2.credentials import Credentials
 
 async def get_token_from_web_flow(secrets_base64_string):
     """
-    Handles the Google OAuth2 flow to get user credentials. (This part works and is unchanged).
+    Handles the Google OAuth2 flow to get user credentials. This logs to the main terminal.
     """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
@@ -74,7 +74,7 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 async def test_api_connection(auth_token_json_string):
     """
-    Tests the connection using pyfetch. (This part works and is unchanged).
+    Tests the connection using pyfetch. This logs to the main terminal.
     """
     print("--> [Python] Running connection test...")
     try:
@@ -101,11 +101,27 @@ async def test_api_connection(auth_token_json_string):
         print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
 
-async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type):
+# ===================================================================
+# THIS IS THE UPDATED UPLOAD FUNCTION
+# It now accepts a 'task_id' and uses a special JS function for logging.
+# ===================================================================
+async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type, task_id):
     """
-    This is the final, working upload function with the case-sensitive typo fixed.
+    Handles the entire video upload process for a single task.
     """
-    print("--> [Python] Starting full upload process...")
+    # Helper function to log to the correct window
+    def log(message):
+        try:
+            # For batch tasks, log to the specific window. For single uploads (task_0), use the main terminal.
+            if "task_" in task_id and task_id != "task_0":
+                js.logToTaskWindow(task_id, message)
+            else:
+                js.logToTerminal(message)
+        except Exception as e:
+            # Fallback print if JS logging fails for any reason
+            print(f"[{task_id}] {message} (JS log failed: {e})")
+            
+    log("--> [Python] Starting full upload process...")
     try:
         creds_data = json.loads(auth_token_json_string)
         access_token = creds_data['token']
@@ -121,11 +137,11 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             }
         }
 
-        print("--> [Python] Decoding Base64 video data to get size...")
+        log("--> [Python] Decoding Base64 video data to get size...")
         video_bytes = base64.b64decode(video_base64_string)
         video_size = len(video_bytes)
 
-        print("--> [Python] Initializing resumable upload session...")
+        log("--> [Python] Initializing resumable upload session...")
         init_response = await pyfetch(
             url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
             method='POST',
@@ -138,26 +154,25 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             body=json.dumps(metadata_body)
         )
         
-        print(f"--> [Python] DEBUG: Initiation Response Status: {init_response.status}")
+        log(f"--> [Python] DEBUG: Initiation Response Status: {init_response.status}")
         
         if not init_response.ok:
             response_text = await init_response.string()
-            print(f"--> [Python] DEBUG: Initiation Response Body: {response_text}")
+            log(f"--> [Python] DEBUG: Initiation Response Body: {response_text}")
             raise Exception(f"Failed to initiate upload session (status {init_response.status})")
             
-        # ===================================================================
-        # THE ONLY FIX IS HERE.
-        # Changed .get('Location') to .get('location') to match the server's response.
-        # ===================================================================
         upload_url = init_response.headers.get('location')
         
         if not upload_url:
-            print(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers}")
+            log(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers}")
             raise Exception("Did not receive an upload URL from Google.")
 
-        print(f"--> [Python] Session initiated. Uploading to: {upload_url[:40]}...")
+        log(f"--> [Python] Session initiated. Uploading...")
 
-        print(f"--> [Python] Uploading {video_size / (1024*1024):.2f} MB of video data...")
+        log(f"--> [Python] Uploading {video_size / (1024*1024):.2f} MB of video data...")
+        
+        # NOTE: For Pyodide, true chunked uploading is complex.
+        # This sends the file in one go, which is reliable for mobile-sized videos.
         upload_response = await pyfetch(
             url=upload_url,
             method='PUT',
@@ -168,10 +183,13 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
              raise Exception(f"Video upload failed with status {upload_response.status}: {await upload_response.string()}")
 
         final_data = await upload_response.json()
-        print("\n✅ SUCCESS! Video uploaded with ID:", final_data.get('id'))
+        log(f"\n✅ SUCCESS! Video uploaded with ID: {final_data.get('id')}")
 
     except Exception as e:
-        print("\n❌ [Python] FATAL ERROR during upload:")
-        traceback.print_exc()
+        log("\n❌ [Python] FATAL ERROR during upload:")
+        # Use traceback to format the exception nicely
+        error_lines = traceback.format_exc().splitlines()
+        for line in error_lines:
+            log(line)
 
-# --- END OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
+# --- END OF FINAL, UPDATED youtube_automator.py ---
