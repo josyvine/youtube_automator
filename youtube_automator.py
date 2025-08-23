@@ -101,13 +101,12 @@ async def test_api_connection(auth_token_json_string):
         print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
 
-async def upload_video(auth_token_json_string, details_json_string, video_base64_string):
+async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type):
     """
-    FIXED: Handles the entire video upload process using pyfetch for resumable uploads.
+    FIXED: This is the new function that performs the entire upload inside Python.
     """
     print("--> [Python] Starting full upload process...")
     try:
-        # 1. Prepare credentials and data
         creds_data = json.loads(auth_token_json_string)
         access_token = creds_data['token']
         
@@ -122,16 +121,10 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             }
         }
 
-        # ===================================================================
-        # THE ONLY FIX IS HERE.
-        # We decode the video FIRST to get its size, and then we add that
-        # size to the initial request header so Google knows what to expect.
-        # ===================================================================
         print("--> [Python] Decoding Base64 video data to get size...")
         video_bytes = base64.b64decode(video_base64_string)
         video_size = len(video_bytes)
 
-        # 2. Start the resumable upload session
         print("--> [Python] Initializing resumable upload session...")
         init_response = await pyfetch(
             url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
@@ -139,22 +132,26 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             headers={
                 'Authorization': f'Bearer {access_token}',
                 'Content-Type': 'application/json; charset=UTF-8',
-                'X-Upload-Content-Type': 'video/*',
-                'X-Upload-Content-Length': str(video_size) # <-- THE CRITICAL FIX
+                'X-Upload-Content-Type': video_mime_type,
+                'X-Upload-Content-Length': str(video_size)
             },
             body=json.dumps(metadata_body)
         )
         
+        print(f"--> [Python] DEBUG: Initiation Response Status: {init_response.status}")
+        
         if not init_response.ok:
-            raise Exception(f"Failed to initiate upload session: {await init_response.string()}")
+            response_text = await init_response.string()
+            print(f"--> [Python] DEBUG: Initiation Response Body: {response_text}")
+            raise Exception(f"Failed to initiate upload session (status {init_response.status})")
             
         upload_url = init_response.headers.get('Location')
         if not upload_url:
+            print(f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers.to_py()}")
             raise Exception("Did not receive an upload URL from Google.")
 
-        print(f"--> [Python] Session initiated. Uploading to: {upload_url[:30]}...")
+        print(f"--> [Python] Session initiated. Uploading to: {upload_url[:40]}...")
 
-        # 3. Upload the actual video file content
         print(f"--> [Python] Uploading {video_size / (1024*1024):.2f} MB of video data...")
         upload_response = await pyfetch(
             url=upload_url,
