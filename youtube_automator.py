@@ -1,18 +1,17 @@
-# --- START OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
+# --- START OF UPDATED youtube_automator.py ---
 
 import json
 import base64
 import traceback
 import js
 import asyncio
-import io
 
 from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
 
 async def get_token_from_web_flow(secrets_base64_string):
     """
-    Handles the Google OAuth2 flow to get user credentials. (This part works and is unchanged).
+    Handles the Google OAuth2 flow to get user credentials. (This function is unchanged).
     """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
@@ -74,7 +73,7 @@ async def get_token_from_web_flow(secrets_base64_string):
 
 async def test_api_connection(auth_token_json_string):
     """
-    Tests the connection using pyfetch. (This part works and is unchanged).
+    Tests the connection using pyfetch. (This function is unchanged).
     """
     print("--> [Python] Running connection test...")
     try:
@@ -101,11 +100,14 @@ async def test_api_connection(auth_token_json_string):
         print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
 
-async def upload_video(auth_token_json_string, details_json_string, video_base64_string, video_mime_type, task_id):
+# --- MAJOR CHANGE: NEW UPLOAD FUNCTION FOR STREAMING ---
+# This function replaces the old Base64-based upload.
+async def upload_video_from_url(auth_token_json_string, details_json_string, video_url, video_mime_type, video_size, task_id):
     """
-    This is the final, working upload function with the case-sensitive typo fixed.
+    Handles the entire video upload process by streaming the video from a local URL
+    provided by the Android app, solving memory limitations for large files.
     """
-    js.logToTaskWindow(task_id, "--> [Python] Starting full upload process...")
+    js.logToTaskWindow(task_id, "--> [Python] Starting streamed upload process...")
     try:
         creds_data = json.loads(auth_token_json_string)
         access_token = creds_data['token']
@@ -121,11 +123,11 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             }
         }
 
-        js.logToTaskWindow(task_id, "--> [Python] Decoding Base64 video data to get size...")
-        video_bytes = base64.b64decode(video_base64_string)
-        video_size = len(video_bytes)
-
-        js.logToTaskWindow(task_id, "--> [Python] Initializing resumable upload session...")
+        js.logToTaskWindow(task_id, f"--> [Python] Video size is {video_size / (1024*1024):.2f} MB.")
+        js.logToTaskWindow(task_id, "--> [Python] Initializing resumable upload session with Google...")
+        
+        # Step 1: Initialize the resumable upload session with Google.
+        # This is the same as before, but we use the `video_size` passed from Android.
         init_response = await pyfetch(
             url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
             method='POST',
@@ -138,37 +140,50 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
             body=json.dumps(metadata_body)
         )
         
-        js.logToTaskWindow(task_id, f"--> [Python] DEBUG: Initiation Response Status: {init_response.status}")
-        
         if not init_response.ok:
             response_text = await init_response.string()
-            js.logToTaskWindow(task_id, f"--> [Python] DEBUG: Initiation Response Body: {response_text}")
+            js.logToTaskWindow(task_id, f"--> [Python] ERROR during initiation: {response_text}")
             raise Exception(f"Failed to initiate upload session (status {init_response.status})")
             
-        # ===================================================================
-        # THE ONLY FIX IS HERE.
-        # Changed .get('Location') to .get('location') to match the server's response.
-        # ===================================================================
         upload_url = init_response.headers.get('location')
         
         if not upload_url:
-            js.logToTaskWindow(task_id, f"--> [Python] DEBUG: Initiation Response Headers: {init_response.headers}")
-            raise Exception("Did not receive an upload URL from Google.")
+            js.logToTaskWindow(task_id, f"--> [Python] DEBUG: Initiation Headers: {init_response.headers}")
+            raise Exception("Did not receive a resumable upload URL from Google.")
 
-        js.logToTaskWindow(task_id, f"--> [Python] Session initiated. Uploading to: {upload_url[:40]}...")
+        js.logToTaskWindow(task_id, f"--> [Python] Session initiated. Preparing to stream.")
+        
+        # Step 2: Fetch the video from the local Android server. This returns a Response
+        # object that can be streamed. It does NOT load the whole video into memory.
+        js.logToTaskWindow(task_id, f"--> [Python] Connecting to local stream at {video_url}...")
+        local_video_stream_response = await pyfetch(url=video_url)
 
-        js.logToTaskWindow(task_id, f"--> [Python] Uploading {video_size / (1024*1024):.2f} MB of video data...")
+        if not local_video_stream_response.ok:
+             raise Exception(f"Failed to connect to local Android stream server (status {local_video_stream_response.status})")
+
+        # Step 3: Stream the video data to Google.
+        # We pass the Response object from the local server directly as the `body`
+        # for the PUT request to Google. `pyfetch` handles the streaming automatically.
+        js.logToTaskWindow(task_id, "--> [Python] Streaming video data to Google...")
         upload_response = await pyfetch(
             url=upload_url,
             method='PUT',
-            body=video_bytes
+            headers={
+                'Content-Length': str(video_size)
+            },
+            body=local_video_stream_response
         )
 
         if not upload_response.ok:
-             raise Exception(f"Video upload failed with status {upload_response.status}: {await upload_response.string()}")
+             error_body = await upload_response.string()
+             js.logToTaskWindow(task_id, f"--> [Python] ERROR during upload: {error_body}")
+             raise Exception(f"Video stream upload failed with status {upload_response.status}")
 
         final_data = await upload_response.json()
-        js.logToTaskWindow(task_id, f"\n✅ SUCCESS! Video uploaded with ID: {final_data.get('id')}")
+        video_id = final_data.get('id')
+        js.logToTaskWindow(task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
+        js.logToTaskWindow(task_id, f"--> Link: https://www.youtube.com/watch?v={video_id}")
+
 
     except Exception as e:
         js.logToTaskWindow(task_id, "\n❌ [Python] FATAL ERROR during upload:")
@@ -176,4 +191,4 @@ async def upload_video(auth_token_json_string, details_json_string, video_base64
         for line in traceback_str.split('\n'):
             js.logToTaskWindow(task_id, line)
 
-# --- END OF FINAL, DEFINITIVE, CORRECTED youtube_automator.py ---
+# --- END OF UPDATED youtube_automator.py ---
