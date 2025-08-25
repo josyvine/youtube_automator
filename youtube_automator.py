@@ -144,8 +144,9 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         
         js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
 
-        # *** THE DEFINITIVE FIX: Removed the incorrect ".pyodide" attribute ***
-        async for chunk in local_video_stream_response.iter_bytes(chunk_size=CHUNK_SIZE):
+        # *** THE DEFINITIVE FIX: The iter_bytes method was removed from the response object
+        # in a recent version. This uses the correct, modern way to stream the body. ***
+        async for chunk in local_video_stream_response.body.iter_bytes(chunk_size=CHUNK_SIZE):
             start_byte = bytes_uploaded
             end_byte = bytes_uploaded + len(chunk) - 1
             
