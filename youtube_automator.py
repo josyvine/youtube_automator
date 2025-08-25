@@ -8,9 +8,7 @@ from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
 
 async def get_token_from_web_flow(secrets_base64_string):
-    """
-    Handles the Google OAuth2 flow to get user credentials. (This function is correct and unchanged).
-    """
+    # This function is correct and unchanged.
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
@@ -70,9 +68,7 @@ async def get_token_from_web_flow(secrets_base64_string):
         return None
 
 async def test_api_connection(auth_token_json_string):
-    """
-    Tests the connection using pyfetch. (This function is correct and unchanged).
-    """
+    # This function is correct and unchanged.
     print("--> [Python] Running connection test...")
     try:
         creds_data = json.loads(auth_token_json_string)
@@ -99,10 +95,6 @@ async def test_api_connection(auth_token_json_string):
         traceback.print_exc()
 
 async def upload_video_from_url(auth_token_json_string, details_json_string, video_url, video_mime_type, video_size, task_id):
-    """
-    Handles the entire video upload process using a robust, manual chunking method.
-    This is the definitive fix for the 'Failed to fetch' error.
-    """
     js.logToTaskWindow(task_id, "--> [Python] Starting robust chunked upload...")
     try:
         creds_data = json.loads(auth_token_json_string)
@@ -147,23 +139,20 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         if not local_video_stream_response.ok:
              raise Exception(f"Failed to connect to local Android stream (status {local_video_stream_response.status})")
 
-        # --- NEW ROBUST CHUNKING LOGIC ---
         CHUNK_SIZE = 4 * 1024 * 1024 # 4 MB chunks
         bytes_uploaded = 0
         
         js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
 
-        # Iterate over the video data from the local server in chunks
-        async for chunk in local_video_stream_response.pyodide.iter_bytes(chunk_size=CHUNK_SIZE):
+        # *** THE DEFINITIVE FIX: Removed the incorrect ".pyodide" attribute ***
+        async for chunk in local_video_stream_response.iter_bytes(chunk_size=CHUNK_SIZE):
             start_byte = bytes_uploaded
             end_byte = bytes_uploaded + len(chunk) - 1
             
-            # This Content-Range header is the key to resumable uploads
             content_range = f"bytes {start_byte}-{end_byte}/{video_size}"
             
             js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: {content_range}")
             
-            # Upload the current chunk to Google's server
             upload_response = await pyfetch(
                 url=upload_url,
                 method='PUT',
@@ -174,9 +163,6 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
                 body=chunk
             )
 
-            # A 308 response means "I got the chunk, send the next one".
-            # A 200 or 201 response means "I got the last chunk, we are done".
-            # Any other response is an error.
             if not (upload_response.status == 308 or upload_response.ok):
                 error_body = await upload_response.string()
                 js.logToTaskWindow(task_id, f"--> [Python] ERROR during chunk upload: {error_body}")
@@ -184,12 +170,12 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
                 
             bytes_uploaded += len(chunk)
 
-            if upload_response.ok: # A 200 or 201 status means the upload is complete
+            if upload_response.ok:
                 final_data = await upload_response.json()
                 video_id = final_data.get('id')
                 js.logToTaskWindow(task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
                 js.logToTaskWindow(task_id, f"--> Link: https://www.youtube.com/watch?v={video_id}")
-                return # Exit the function on success
+                return
 
         js.logToTaskWindow(task_id, "\n❌ [Python] ERROR: Upload loop finished but did not get success status from Google.")
 
