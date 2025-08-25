@@ -139,9 +139,6 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         if not local_video_stream_response.ok:
              raise Exception(f"Failed to connect to local Android stream (status {local_video_stream_response.status})")
 
-        # *** THE DEFINITIVE FIX: Avoid the problematic streaming API. ***
-        # Load the entire video into a bytes object in memory first.
-        # This is more robust and avoids the .body/.iter_bytes() errors.
         js.logToTaskWindow(task_id, "--> [Python] Loading video into memory...")
         video_data = await local_video_stream_response.bytes()
         js.logToTaskWindow(task_id, f"--> [Python] Video loaded ({len(video_data) / (1024*1024):.2f} MB).")
