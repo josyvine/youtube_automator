@@ -139,17 +139,28 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         if not local_video_stream_response.ok:
              raise Exception(f"Failed to connect to local Android stream (status {local_video_stream_response.status})")
 
+        # *** THE DEFINITIVE FIX: Avoid the problematic streaming API. ***
+        # Load the entire video into a bytes object in memory first.
+        # This is more robust and avoids the .body/.iter_bytes() errors.
+        js.logToTaskWindow(task_id, "--> [Python] Loading video into memory...")
+        video_data = await local_video_stream_response.bytes()
+        js.logToTaskWindow(task_id, f"--> [Python] Video loaded ({len(video_data) / (1024*1024):.2f} MB).")
+
         CHUNK_SIZE = 4 * 1024 * 1024 # 4 MB chunks
         bytes_uploaded = 0
         
-        js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
+        js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload from memory...")
 
-        # *** THE DEFINITIVE FIX: The iter_bytes method was removed from the response object
-        # in a recent version. This uses the correct, modern way to stream the body. ***
-        async for chunk in local_video_stream_response.body.iter_bytes(chunk_size=CHUNK_SIZE):
+        while bytes_uploaded < video_size:
+            chunk_start = bytes_uploaded
+            chunk_end = min(bytes_uploaded + CHUNK_SIZE, len(video_data))
+            chunk = video_data[chunk_start:chunk_end]
+
+            if not chunk:
+                break
+            
             start_byte = bytes_uploaded
             end_byte = bytes_uploaded + len(chunk) - 1
-            
             content_range = f"bytes {start_byte}-{end_byte}/{video_size}"
             
             js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: {content_range}")
