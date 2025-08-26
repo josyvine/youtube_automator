@@ -139,25 +139,16 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         if not local_video_stream_response.ok:
              raise Exception(f"Failed to connect to local Android stream (status {local_video_stream_response.status})")
 
-        js.logToTaskWindow(task_id, "--> [Python] Loading video into memory...")
-        video_data = await local_video_stream_response.bytes()
-        js.logToTaskWindow(task_id, f"--> [Python] Video loaded ({len(video_data) / (1024*1024):.2f} MB).")
-
         CHUNK_SIZE = 4 * 1024 * 1024 # 4 MB chunks
         bytes_uploaded = 0
         
-        js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload from memory...")
+        js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
 
-        while bytes_uploaded < video_size:
-            chunk_start = bytes_uploaded
-            chunk_end = min(bytes_uploaded + CHUNK_SIZE, len(video_data))
-            chunk = video_data[chunk_start:chunk_end]
-
-            if not chunk:
-                break
-            
+        # *** THE DEFINITIVE FIX: Removed the incorrect ".pyodide" attribute ***
+        async for chunk in local_video_stream_response.iter_bytes(chunk_size=CHUNK_SIZE):
             start_byte = bytes_uploaded
             end_byte = bytes_uploaded + len(chunk) - 1
+            
             content_range = f"bytes {start_byte}-{end_byte}/{video_size}"
             
             js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: {content_range}")
@@ -193,3 +184,4 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         traceback_str = traceback.format_exc()
         for line in traceback_str.split('\n'):
             js.logToTaskWindow(task_id, line)
+
