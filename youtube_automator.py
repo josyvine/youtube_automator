@@ -3,7 +3,6 @@ import base64
 import traceback
 import js
 import asyncio
-import io
 
 from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
@@ -99,133 +98,133 @@ async def test_api_connection(auth_token_json_string):
         print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
 
-# --- CLASS TO HANDLE THE LOGIC FOR A SINGLE UPLOAD ---
-class ChunkedVideoUploader:
-    def __init__(self):
-        self.video_stream = None
-        self.task_id = None
 
-    def start_new_upload(self, task_id):
-        """Prepares the in-memory stream for a new file upload."""
+# --- NEW STREAMING UPLOADER ---
+class StreamingUploader:
+    """
+    Manages the state for a single, memory-efficient, streaming video upload.
+    """
+    def __init__(self, task_id, auth_token_json, details_json, mime_type, total_size):
         self.task_id = task_id
-        self.video_stream = io.BytesIO()
-        js.logToTaskWindow(self.task_id, "--> [Python] Uploader initialized and ready for chunks.")
+        self.auth_token = json.loads(auth_token_json)
+        self.details = json.loads(details_json)
+        self.mime_type = mime_type
+        self.total_size = total_size
+        self.upload_url = None
+        self.bytes_uploaded = 0
 
-    def append_chunk(self, chunk_base64):
-        """Adds a new chunk of data to the in-memory stream."""
-        try:
-            decoded_chunk = base64.b64decode(chunk_base64)
-            self.video_stream.write(decoded_chunk)
-            return True
-        except Exception as e:
-            js.logToTaskWindow(self.task_id, f"❌ [Python] Error processing chunk: {e}")
-            return False
+    def get_progress_percent(self):
+        if self.total_size == 0:
+            return 0
+        return (self.bytes_uploaded / self.total_size) * 100
 
-    async def finalize_and_upload(self, auth_token_json_string, details_json_string, video_mime_type):
-        """Performs the actual upload to Google after all chunks are received."""
-        js.logToTaskWindow(self.task_id, "--> [Python] All chunks received. Finalizing upload...")
-        details = {}
-        try:
-            self.video_stream.seek(0)
-            video_bytes = self.video_stream.getvalue()
-            video_size = len(video_bytes)
+    async def initiate_session(self):
+        js.logToTaskWindow(self.task_id, "--> [Python] Initializing resumable upload session...")
+        metadata_body = {
+            'snippet': {
+                'title': self.details['title'],
+                'description': self.details['description'],
+            },
+            'status': {'privacyStatus': self.details['privacy']}
+        }
+        
+        init_response = await pyfetch(
+            url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+            method='POST',
+            headers={
+                'Authorization': f'Bearer {self.auth_token["token"]}',
+                'Content-Type': 'application/json; charset=UTF-8',
+                'X-Upload-Content-Type': self.mime_type,
+                'X-Upload-Content-Length': str(self.total_size) 
+            },
+            body=json.dumps(metadata_body)
+        )
+        
+        if not init_response.ok:
+            raise Exception(f"Failed to initiate session (status {init_response.status}): {await init_response.string()}")
             
-            self.video_stream.close()
-            self.video_stream = None
+        self.upload_url = init_response.headers.get('location')
+        if not self.upload_url:
+            raise Exception("Did not receive an upload URL from Google.")
+        
+        js.logToTaskWindow(self.task_id, "--> [Python] Session initiated. Ready for chunks.")
 
-            js.logToTaskWindow(self.task_id, f"--> [Python] Total video size: {video_size / (1024*1024):.2f} MB.")
-            
-            creds_data = json.loads(auth_token_json_string)
-            access_token = creds_data['token']
-            
-            details = json.loads(details_json_string)
-            metadata_body = {
-                'snippet': {
-                    'title': details['title'],
-                    'description': details['description'],
-                },
-                'status': {
-                    'privacyStatus': details['privacy']
-                }
-            }
+    async def upload_chunk(self, chunk_base64):
+        chunk_bytes = base64.b64decode(chunk_base64)
+        
+        # This PUT request sends the raw video bytes for the current chunk
+        upload_response = await pyfetch(
+            url=self.upload_url,
+            method='PUT',
+            headers={'Content-Length': str(len(chunk_bytes))},
+            body=chunk_bytes
+        )
 
-            js.logToTaskWindow(self.task_id, "--> [Python] Initializing resumable upload session...")
-            init_response = await pyfetch(
-                url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
-                method='POST',
-                headers={
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json; charset=UTF-8',
-                    'X-Upload-Content-Type': video_mime_type,
-                    'X-Upload-Content-Length': str(video_size) 
-                },
-                body=json.dumps(metadata_body)
-            )
-            
-            if not init_response.ok:
-                response_text = await init_response.string()
-                raise Exception(f"Failed to initiate upload session (status {init_response.status}): {response_text}")
-                
-            upload_url = init_response.headers.get('location')
-            if not upload_url:
-                raise Exception("Did not receive an upload URL from Google.")
+        # A 308 response is the expected success code for all chunks except the last one.
+        # If the final chunk is sent, YouTube will return a 200 OK instead.
+        if not upload_response.ok and upload_response.status != 308:
+            raise Exception(f"Chunk upload failed with status {upload_response.status}: {await upload_response.string()}")
+        
+        self.bytes_uploaded += len(chunk_bytes)
 
-            js.logToTaskWindow(self.task_id, f"--> [Python] Session initiated. Uploading video data...")
-            upload_response = await pyfetch(
-                url=upload_url,
-                method='PUT',
-                body=video_bytes
-            )
+    async def finalize_upload(self):
+        # According to Google's resumable upload protocol, the upload is finalized
+        # when the last byte is successfully received. The response to the PUT request
+        # containing the last byte will be a 200 OK with the final video resource.
+        # If the JS loop finishes and we haven't hit an error, we can query the status
+        # to get the final video ID, just in case the final response was missed.
+        
+        status_check_response = await pyfetch(
+            url=self.upload_url,
+            method='PUT',
+            headers={'Content-Range': f'bytes */{self.total_size}'}
+        )
+        
+        if not status_check_response.ok:
+             raise Exception(f"Final status check failed with status {status_check_response.status}: {await status_check_response.string()}")
 
-            if not upload_response.ok:
-                 raise Exception(f"Video upload failed with status {upload_response.status}: {await upload_response.string()}")
+        final_data = await status_check_response.json()
+        video_id = final_data.get('id')
+        privacy_status = self.details.get('privacy', 'private')
 
-            final_data = await upload_response.json()
-            video_id = final_data.get('id')
-            privacy_status = details.get('privacy', 'private')
-            js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
-            js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
-            js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
+        js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
+        js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
+        js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
 
 
-        except Exception as e:
-            js.logToTaskWindow(self.task_id, "\n❌ [Python] FATAL ERROR during upload:")
-            traceback_str = traceback.format_exc()
-            for line in traceback_str.split('\n'):
-                js.logToTaskWindow(self.task_id, line)
-
-# --- GLOBAL SESSION MANAGER FOR JAVASCRIPT TO INTERACT WITH ---
-
-# This dictionary holds an uploader instance for each concurrent task.
+# --- GLOBAL SESSION MANAGER FOR JAVASCRIPT ---
 upload_sessions = {}
 
-def start_new_upload(task_id):
-    """Called by JS to create and prepare an uploader instance for a task."""
-    if task_id in upload_sessions:
-        js.logToTaskWindow(task_id, f"⚠️ [Python] Warning: Overwriting existing session for {task_id}.")
-    
-    uploader = ChunkedVideoUploader()
-    upload_sessions[task_id] = uploader
-    uploader.start_new_upload(task_id)
-    return True
-
-def append_chunk(task_id, chunk_base64):
-    """Called by JS to append a chunk to a specific task's uploader."""
-    if task_id not in upload_sessions:
-        js.logToTaskWindow(task_id, f"❌ [Python] Error: No session found for {task_id} to append chunk.")
-        return False
-    return upload_sessions[task_id].append_chunk(chunk_base64)
-
-async def finalize_and_upload(task_id, auth_token_json_string, details_json_string, video_mime_type):
-    """Called by JS to finalize a specific task's upload and clean up."""
-    if task_id not in upload_sessions:
-        js.logToTaskWindow(task_id, f"❌ [Python] Error: No session found for {task_id} to finalize.")
-        return
-
-    uploader = upload_sessions[task_id]
+async def initiate_upload_session(task_id, auth_token_json, details_json, mime_type, total_size):
     try:
-        await uploader.finalize_and_upload(auth_token_json_string, details_json_string, video_mime_type)
+        uploader = StreamingUploader(task_id, auth_token_json, details_json, mime_type, total_size)
+        upload_sessions[task_id] = uploader
+        await uploader.initiate_session()
+    except Exception as e:
+        js.logToTaskWindow(task_id, f"❌ [Python] ERROR during initiation: {str(e)}")
+        traceback.print_exc()
+        raise e
+
+async def upload_chunk(task_id, chunk_base64):
+    try:
+        if task_id not in upload_sessions:
+            raise Exception(f"No active session for task_id: {task_id}")
+        await upload_sessions[task_id].upload_chunk(chunk_base64)
+    except Exception as e:
+        js.logToTaskWindow(task_id, f"❌ [Python] ERROR during chunk upload: {str(e)}")
+        traceback.print_exc()
+        raise e
+
+async def finalize_upload(task_id):
+    try:
+        if task_id not in upload_sessions:
+            raise Exception(f"No active session for task_id: {task_id}")
+        await upload_sessions[task_id].finalize_upload()
+    except Exception as e:
+        js.logToTaskWindow(task_id, f"❌ [Python] ERROR during finalization: {str(e)}")
+        traceback.print_exc()
+        raise e
     finally:
-        # Clean up the session to free memory, regardless of success or failure.
+        # Clean up session to free memory, regardless of success or failure
         if task_id in upload_sessions:
             del upload_sessions[task_id]
