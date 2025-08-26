@@ -3,12 +3,15 @@ import base64
 import traceback
 import js
 import asyncio
+import io
 
 from pyodide.http import pyfetch
 from google.oauth2.credentials import Credentials
 
 async def get_token_from_web_flow(secrets_base64_string):
-    # This function is correct and unchanged.
+    """
+    Handles the Google OAuth2 flow to get user credentials. (This part works and is unchanged).
+    """
     try:
         secrets_json_string = base64.b64decode(secrets_base64_string).decode('utf-8')
         client_config = json.loads(secrets_json_string)
@@ -68,7 +71,9 @@ async def get_token_from_web_flow(secrets_base64_string):
         return None
 
 async def test_api_connection(auth_token_json_string):
-    # This function is correct and unchanged.
+    """
+    Tests the connection using pyfetch. (This part works and is unchanged).
+    """
     print("--> [Python] Running connection test...")
     try:
         creds_data = json.loads(auth_token_json_string)
@@ -94,100 +99,104 @@ async def test_api_connection(auth_token_json_string):
         print("\n❌ FAILED: An unexpected error occurred during Python connection test.")
         traceback.print_exc()
 
-async def upload_video_from_url(auth_token_json_string, details_json_string, video_url, video_mime_type, video_size, task_id):
-    js.logToTaskWindow(task_id, "--> [Python] Starting robust chunked upload...")
-    try:
-        creds_data = json.loads(auth_token_json_string)
-        access_token = creds_data['token']
-        
-        details = json.loads(details_json_string)
-        metadata_body = {
-            'snippet': {
-                'title': details['title'],
-                'description': details['description'],
-            },
-            'status': {
-                'privacyStatus': details['privacy']
+# --- NEW: CLASS TO HANDLE CHUNKED UPLOADS ---
+class ChunkedVideoUploader:
+    def __init__(self):
+        self.video_stream = None
+        self.task_id = None
+
+    def start_new_upload(self, task_id):
+        """
+        Called by JavaScript to prepare for a new file upload.
+        """
+        self.task_id = task_id
+        # Use io.BytesIO to build the file in memory from chunks
+        self.video_stream = io.BytesIO()
+        js.logToTaskWindow(self.task_id, "--> [Python] Uploader initialized and ready for chunks.")
+        return True
+
+    def append_chunk(self, chunk_base64):
+        """
+        Called repeatedly by JavaScript to send one piece of the file.
+        """
+        try:
+            # Decode the chunk from Base64 and write it to our in-memory stream
+            decoded_chunk = base64.b64decode(chunk_base64)
+            self.video_stream.write(decoded_chunk)
+            return True # Signal success back to JavaScript
+        except Exception as e:
+            js.logToTaskWindow(self.task_id, f"❌ [Python] Error processing chunk: {e}")
+            return False
+
+    async def finalize_and_upload(self, auth_token_json_string, details_json_string, video_mime_type):
+        """
+        Called by JavaScript after all chunks have been sent. This performs the actual upload to Google.
+        """
+        js.logToTaskWindow(self.task_id, "--> [Python] All chunks received. Finalizing upload...")
+        try:
+            # Get the complete video data from the stream we built
+            self.video_stream.seek(0) # Go to the beginning of the stream
+            video_bytes = self.video_stream.getvalue()
+            video_size = len(video_bytes)
+            
+            # Close and clear the stream to release memory immediately
+            self.video_stream.close()
+            self.video_stream = None
+
+            js.logToTaskWindow(self.task_id, f"--> [Python] Total video size: {video_size / (1024*1024):.2f} MB.")
+            
+            # --- The rest of this is the original upload logic from your file ---
+            creds_data = json.loads(auth_token_json_string)
+            access_token = creds_data['token']
+            
+            details = json.loads(details_json_string)
+            metadata_body = {
+                'snippet': {
+                    'title': details['title'],
+                    'description': details['description'],
+                },
+                'status': {
+                    'privacyStatus': details['privacy']
+                }
             }
-        }
 
-        js.logToTaskWindow(task_id, f"--> [Python] Video size is {video_size / (1024*1024):.2f} MB.")
-        js.logToTaskWindow(task_id, "--> [Python] Initializing resumable upload session with Google...")
-        
-        init_response = await pyfetch(
-            url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
-            method='POST',
-            headers={
-                'Authorization': f'Bearer {access_token}',
-                'Content-Type': 'application/json; charset=UTF-8',
-                'X-Upload-Content-Type': video_mime_type,
-                'X-Upload-Content-Length': str(video_size) 
-            },
-            body=json.dumps(metadata_body)
-        )
-        
-        if not init_response.ok:
-            raise Exception(f"Failed to initiate upload (status {init_response.status}): {await init_response.string()}")
+            js.logToTaskWindow(self.task_id, "--> [Python] Initializing resumable upload session...")
+            init_response = await pyfetch(
+                url='https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+                method='POST',
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json; charset=UTF-8',
+                    'X-Upload-Content-Type': video_mime_type,
+                    'X-Upload-Content-Length': str(video_size) 
+                },
+                body=json.dumps(metadata_body)
+            )
             
-        upload_url = init_response.headers.get('location')
-        if not upload_url:
-            raise Exception("Did not receive a resumable upload URL from Google.")
+            if not init_response.ok:
+                response_text = await init_response.string()
+                raise Exception(f"Failed to initiate upload session (status {init_response.status}): {response_text}")
+                
+            upload_url = init_response.headers.get('location')
+            if not upload_url:
+                raise Exception("Did not receive an upload URL from Google.")
 
-        js.logToTaskWindow(task_id, f"--> [Python] Session initiated. Connecting to local stream...")
-        
-        local_video_stream_response = await pyfetch(url=video_url)
-        if not local_video_stream_response.ok:
-             raise Exception(f"Failed to connect to local Android stream (status {local_video_stream_response.status})")
-
-        CHUNK_SIZE = 4 * 1024 * 1024 # 4 MB chunks
-        bytes_uploaded = 0
-        
-        js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
-
-        # --- START OF THE CORRECTED CODE ---
-        # The 'async for' loop is replaced with a 'while' loop using the correct stream API.
-        stream = local_video_stream_response.stream()
-        while True:
-            chunk = await stream.read(CHUNK_SIZE)
-            if not chunk:
-                break # End of stream
-
-            start_byte = bytes_uploaded
-            end_byte = bytes_uploaded + len(chunk) - 1
-            
-            content_range = f"bytes {start_byte}-{end_byte}/{video_size}"
-            
-            js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: bytes {start_byte}-{end_byte}/{video_size}")
-            
+            js.logToTaskWindow(self.task_id, f"--> [Python] Session initiated. Uploading video data...")
             upload_response = await pyfetch(
                 url=upload_url,
                 method='PUT',
-                headers={
-                    'Content-Length': str(len(chunk)),
-                    'Content-Range': content_range
-                },
-                body=chunk
+                body=video_bytes
             )
 
-            if not (upload_response.status == 308 or upload_response.ok):
-                error_body = await upload_response.string()
-                js.logToTaskWindow(task_id, f"--> [Python] ERROR during chunk upload: {error_body}")
-                raise Exception(f"Chunk upload failed with status {upload_response.status}")
-                
-            bytes_uploaded += len(chunk)
+            if not upload_response.ok:
+                 raise Exception(f"Video upload failed with status {upload_response.status}: {await upload_response.string()}")
 
-            if upload_response.ok:
-                final_data = await upload_response.json()
-                video_id = final_data.get('id')
-                js.logToTaskWindow(task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
-                js.logToTaskWindow(task_id, f"--> Link: https://www.youtube.com/watch?v={video_id}")
-                return
-        # --- END OF THE CORRECTED CODE ---
+            final_data = await upload_response.json()
+            js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {final_data.get('id')}")
 
-        js.logToTaskWindow(task_id, "\n❌ [Python] ERROR: Upload loop finished but did not get success status from Google.")
+        except Exception as e:
+            js.logToTaskWindow(self.task_id, "\n❌ [Python] FATAL ERROR during upload:")
+            traceback_str = traceback.format_exc()
+            for line in traceback_str.split('\n'):
+                js.logToTaskWindow(self.task_id, line)
 
-    except Exception as e:
-        js.logToTaskWindow(task_id, "\n❌ [Python] FATAL ERROR during upload:")
-        traceback_str = traceback.format_exc()
-        for line in traceback_str.split('\n'):
-            js.logToTaskWindow(task_id, line)
