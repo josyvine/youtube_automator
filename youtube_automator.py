@@ -144,14 +144,20 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         
         js.logToTaskWindow(task_id, "--> [Python] Starting chunk-by-chunk upload...")
 
-        # *** THE DEFINITIVE FIX: Removed the incorrect ".pyodide" attribute ***
-        async for chunk in local_video_stream_response.iter_bytes(chunk_size=CHUNK_SIZE):
+        # --- START OF THE CORRECTED CODE ---
+        # The 'async for' loop is replaced with a 'while' loop using the correct stream API.
+        stream = local_video_stream_response.stream()
+        while True:
+            chunk = await stream.read(CHUNK_SIZE)
+            if not chunk:
+                break # End of stream
+
             start_byte = bytes_uploaded
             end_byte = bytes_uploaded + len(chunk) - 1
             
             content_range = f"bytes {start_byte}-{end_byte}/{video_size}"
             
-            js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: {content_range}")
+            js.logToTaskWindow(task_id, f"--> [Python] Uploading chunk: bytes {start_byte}-{end_byte}/{video_size}")
             
             upload_response = await pyfetch(
                 url=upload_url,
@@ -176,6 +182,7 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
                 js.logToTaskWindow(task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
                 js.logToTaskWindow(task_id, f"--> Link: https://www.youtube.com/watch?v={video_id}")
                 return
+        # --- END OF THE CORRECTED CODE ---
 
         js.logToTaskWindow(task_id, "\n❌ [Python] ERROR: Upload loop finished but did not get success status from Google.")
 
@@ -184,4 +191,3 @@ async def upload_video_from_url(auth_token_json_string, details_json_string, vid
         traceback_str = traceback.format_exc()
         for line in traceback_str.split('\n'):
             js.logToTaskWindow(task_id, line)
-
