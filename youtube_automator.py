@@ -112,6 +112,7 @@ class StreamingUploader:
         self.total_size = total_size
         self.upload_url = None
         self.bytes_uploaded = 0
+        self.final_response_data = None # Will store the success response
 
     def get_progress_percent(self):
         if self.total_size == 0:
@@ -152,7 +153,6 @@ class StreamingUploader:
     async def upload_chunk(self, chunk_base64):
         chunk_bytes = base64.b64decode(chunk_base64)
         
-        # This PUT request sends the raw video bytes for the current chunk
         upload_response = await pyfetch(
             url=self.upload_url,
             method='PUT',
@@ -160,36 +160,34 @@ class StreamingUploader:
             body=chunk_bytes
         )
 
-        # A 308 response is the expected success code for all chunks except the last one.
-        # If the final chunk is sent, YouTube will return a 200 OK instead.
-        if not upload_response.ok and upload_response.status != 308:
+        # THE FIX: Check for the final success code (200 OK) here.
+        if upload_response.status == 200:
+            # This was the final chunk and the upload is complete.
+            self.final_response_data = await upload_response.json()
+        elif upload_response.status == 308:
+            # This is the expected "in progress" response.
+            pass
+        else:
+            # Any other response is an unexpected error.
             raise Exception(f"Chunk upload failed with status {upload_response.status}: {await upload_response.string()}")
         
         self.bytes_uploaded += len(chunk_bytes)
 
-    async def finalize_upload(self):
-        # According to Google's resumable upload protocol, the upload is finalized
-        # when the last byte is successfully received. The response to the PUT request
-        # containing the last byte will be a 200 OK with the final video resource.
-        # If the JS loop finishes and we haven't hit an error, we can query the status
-        # to get the final video ID, just in case the final response was missed.
-        
-        status_check_response = await pyfetch(
-            url=self.upload_url,
-            method='PUT',
-            headers={'Content-Range': f'bytes */{self.total_size}'}
-        )
-        
-        if not status_check_response.ok:
-             raise Exception(f"Final status check failed with status {status_check_response.status}: {await status_check_response.string()}")
+    def finalize_upload(self):
+        # THE FIX: This function no longer makes a network call.
+        # It relies on the data captured during the final 'upload_chunk' call.
+        if self.final_response_data:
+            video_id = self.final_response_data.get('id')
+            privacy_status = self.details.get('privacy', 'private')
 
-        final_data = await status_check_response.json()
-        video_id = final_data.get('id')
-        privacy_status = self.details.get('privacy', 'private')
-
-        js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
-        js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
-        js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
+            js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
+            js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
+            js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
+        else:
+            # This case means JS called finalize, but we never received a 200 OK response from Google.
+            # The upload must have failed or was incomplete.
+            js.logToTaskWindow(self.task_id, f"\n❌ [Python] ERROR: Finalization called, but upload did not complete successfully.")
+            js.logToTaskWindow(self.task_id, f"--> Last known progress: {self.get_progress_percent():.1f}%. Check for earlier errors.")
 
 
 # --- GLOBAL SESSION MANAGER FOR JAVASCRIPT ---
@@ -219,7 +217,10 @@ async def finalize_upload(task_id):
     try:
         if task_id not in upload_sessions:
             raise Exception(f"No active session for task_id: {task_id}")
-        await upload_sessions[task_id].finalize_upload()
+        
+        # The 'await' is removed as the new finalize_upload is not an async network call.
+        upload_sessions[task_id].finalize_upload()
+
     except Exception as e:
         js.logToTaskWindow(task_id, f"❌ [Python] ERROR during finalization: {str(e)}")
         traceback.print_exc()
