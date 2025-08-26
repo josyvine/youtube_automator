@@ -99,7 +99,7 @@ async def test_api_connection(auth_token_json_string):
         traceback.print_exc()
 
 
-# --- ROBUST STREAMING UPLOADER ---
+# --- FINAL, ROBUST STREAMING UPLOADER ---
 class StreamingUploader:
     """
     Manages the state for a single, memory-efficient, streaming video upload.
@@ -151,61 +151,68 @@ class StreamingUploader:
 
     async def upload_chunk(self, chunk_base64):
         chunk_bytes = base64.b64decode(chunk_base64)
-        
+        chunk_size = len(chunk_bytes)
+        start_byte = self.bytes_uploaded
+        end_byte = self.bytes_uploaded + chunk_size - 1
+
+        # THE CRITICAL FIX: Add the Content-Range header to every chunk.
+        # This tells Google which part of the file is being sent.
+        headers = {
+            'Content-Range': f'bytes {start_byte}-{end_byte}/{self.total_size}'
+        }
+
         upload_response = await pyfetch(
             url=self.upload_url,
             method='PUT',
-            headers={'Content-Length': str(len(chunk_bytes))},
+            headers=headers,
             body=chunk_bytes
         )
 
-        # The upload is NOT considered complete here. We only check for errors.
-        # The final '200 OK' might be missed due to timing, so we will poll for it later.
-        if not upload_response.ok and upload_response.status != 308:
-            raise Exception(f"Chunk upload failed with status {upload_response.status}: {await upload_response.string()}")
-        
-        self.bytes_uploaded += len(chunk_bytes)
+        # Update the byte count AFTER the request.
+        self.bytes_uploaded += chunk_size
+
+        if upload_response.status == 200 or upload_response.status == 201:
+            # SUCCESS: Google confirms the final chunk was received and the upload is complete.
+            final_data = await upload_response.json()
+            video_id = final_data.get('id')
+            privacy_status = self.details.get('privacy', 'private')
+
+            js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
+            js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
+            js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
+
+        elif upload_response.status == 308:
+            # IN PROGRESS: This is the expected response for all non-final chunks.
+            pass
+        else:
+            # UNEXPECTED ERROR: An actual error occurred.
+            raise Exception(f"Chunk upload failed with unexpected status {upload_response.status}: {await upload_response.string()}")
 
     async def finalize_upload(self):
         """
-        THE FIX: This function now patiently polls Google's servers to confirm
-        the upload is complete, solving the race condition.
+        This function is now a safeguard. It queries the final status in case the
+        last chunk response was missed. It is no longer the primary method for success detection.
         """
-        max_retries = 5
-        retry_delay_seconds = 2
-
-        for attempt in range(max_retries):
-            js.logToTaskWindow(self.task_id, f"--> [Python] Verifying final status (Attempt {attempt + 1}/{max_retries})...")
-            
-            # Query the status of the upload.
-            status_check_response = await pyfetch(
-                url=self.upload_url,
-                method='PUT',
-                headers={'Content-Range': f'bytes */{self.total_size}'}
-            )
-            
-            if status_check_response.status == 200:
-                # SUCCESS: Google confirms the upload is complete.
-                final_data = await status_check_response.json()
-                video_id = final_data.get('id')
-                privacy_status = self.details.get('privacy', 'private')
-
-                js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
-                js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
-                js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
-                return # Exit the function on success.
-
-            elif status_check_response.status == 308:
-                # IN PROGRESS: Google is still processing. Wait and try again.
-                await asyncio.sleep(retry_delay_seconds)
-                continue
-
-            else:
-                # UNEXPECTED ERROR: An actual error occurred.
-                raise Exception(f"Final status check failed with unexpected status {status_check_response.status}: {await status_check_response.string()}")
+        js.logToTaskWindow(self.task_id, "--> [Python] Verifying final upload status with server...")
         
-        # If the loop finishes without success, the upload timed out.
-        raise Exception("Finalization timed out. Server did not confirm upload completion.")
+        status_check_response = await pyfetch(
+            url=self.upload_url,
+            method='PUT',
+            headers={'Content-Range': f'bytes */{self.total_size}'}
+        )
+        
+        if status_check_response.status == 200 or status_check_response.status == 201:
+            final_data = await status_check_response.json()
+            video_id = final_data.get('id')
+            # This success message may be redundant if the last chunk already confirmed it, which is fine.
+            js.logToTaskWindow(self.task_id, f"--> [Python] Final verification successful for video ID: {video_id}")
+            return
+        
+        # If the status is 308, it means the server still thinks the upload is incomplete.
+        elif status_check_response.status == 308:
+            raise Exception("Finalization check failed: Server reports upload is still incomplete.")
+        else:
+            raise Exception(f"Finalization check failed with unexpected status {status_check_response.status}: {await status_check_response.string()}")
 
 
 # --- GLOBAL SESSION MANAGER FOR JAVASCRIPT ---
@@ -240,9 +247,7 @@ async def finalize_upload(task_id):
 
     except Exception as e:
         js.logToTaskWindow(task_id, f"❌ [Python] ERROR during finalization: {str(e)}")
-        # Don't print the full traceback for the expected timeout error, just the message.
-        if "Finalization timed out" not in str(e):
-            traceback.print_exc()
+        traceback.print_exc()
         raise e
     finally:
         # Clean up session to free memory, regardless of success or failure
