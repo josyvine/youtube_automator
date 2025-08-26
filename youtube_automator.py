@@ -200,3 +200,5 @@ class ChunkedVideoUploader:
             for line in traceback_str.split('\n'):
                 js.logToTaskWindow(self.task_id, line)
 
+# Create a single, global instance of the uploader class for JavaScript to access.
+chunk_uploader = ChunkedVideoUploader()
