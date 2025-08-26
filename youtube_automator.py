@@ -99,7 +99,7 @@ async def test_api_connection(auth_token_json_string):
         traceback.print_exc()
 
 
-# --- NEW STREAMING UPLOADER ---
+# --- ROBUST STREAMING UPLOADER ---
 class StreamingUploader:
     """
     Manages the state for a single, memory-efficient, streaming video upload.
@@ -112,7 +112,6 @@ class StreamingUploader:
         self.total_size = total_size
         self.upload_url = None
         self.bytes_uploaded = 0
-        self.final_response_data = None # Will store the success response
 
     def get_progress_percent(self):
         if self.total_size == 0:
@@ -160,34 +159,53 @@ class StreamingUploader:
             body=chunk_bytes
         )
 
-        # THE FIX: Check for the final success code (200 OK) here.
-        if upload_response.status == 200:
-            # This was the final chunk and the upload is complete.
-            self.final_response_data = await upload_response.json()
-        elif upload_response.status == 308:
-            # This is the expected "in progress" response.
-            pass
-        else:
-            # Any other response is an unexpected error.
+        # The upload is NOT considered complete here. We only check for errors.
+        # The final '200 OK' might be missed due to timing, so we will poll for it later.
+        if not upload_response.ok and upload_response.status != 308:
             raise Exception(f"Chunk upload failed with status {upload_response.status}: {await upload_response.string()}")
         
         self.bytes_uploaded += len(chunk_bytes)
 
-    def finalize_upload(self):
-        # THE FIX: This function no longer makes a network call.
-        # It relies on the data captured during the final 'upload_chunk' call.
-        if self.final_response_data:
-            video_id = self.final_response_data.get('id')
-            privacy_status = self.details.get('privacy', 'private')
+    async def finalize_upload(self):
+        """
+        THE FIX: This function now patiently polls Google's servers to confirm
+        the upload is complete, solving the race condition.
+        """
+        max_retries = 5
+        retry_delay_seconds = 2
 
-            js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
-            js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
-            js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
-        else:
-            # This case means JS called finalize, but we never received a 200 OK response from Google.
-            # The upload must have failed or was incomplete.
-            js.logToTaskWindow(self.task_id, f"\n❌ [Python] ERROR: Finalization called, but upload did not complete successfully.")
-            js.logToTaskWindow(self.task_id, f"--> Last known progress: {self.get_progress_percent():.1f}%. Check for earlier errors.")
+        for attempt in range(max_retries):
+            js.logToTaskWindow(self.task_id, f"--> [Python] Verifying final status (Attempt {attempt + 1}/{max_retries})...")
+            
+            # Query the status of the upload.
+            status_check_response = await pyfetch(
+                url=self.upload_url,
+                method='PUT',
+                headers={'Content-Range': f'bytes */{self.total_size}'}
+            )
+            
+            if status_check_response.status == 200:
+                # SUCCESS: Google confirms the upload is complete.
+                final_data = await status_check_response.json()
+                video_id = final_data.get('id')
+                privacy_status = self.details.get('privacy', 'private')
+
+                js.logToTaskWindow(self.task_id, f"\n✅ SUCCESS! Video uploaded with ID: {video_id}")
+                js.logToTaskWindow(self.task_id, "--> NOTE: The video is now processing on YouTube.")
+                js.logToTaskWindow(self.task_id, f"--> It was uploaded as '{privacy_status}' and may take several minutes to appear in your YouTube Studio 'Content' section.")
+                return # Exit the function on success.
+
+            elif status_check_response.status == 308:
+                # IN PROGRESS: Google is still processing. Wait and try again.
+                await asyncio.sleep(retry_delay_seconds)
+                continue
+
+            else:
+                # UNEXPECTED ERROR: An actual error occurred.
+                raise Exception(f"Final status check failed with unexpected status {status_check_response.status}: {await status_check_response.string()}")
+        
+        # If the loop finishes without success, the upload timed out.
+        raise Exception("Finalization timed out. Server did not confirm upload completion.")
 
 
 # --- GLOBAL SESSION MANAGER FOR JAVASCRIPT ---
@@ -218,12 +236,13 @@ async def finalize_upload(task_id):
         if task_id not in upload_sessions:
             raise Exception(f"No active session for task_id: {task_id}")
         
-        # The 'await' is removed as the new finalize_upload is not an async network call.
-        upload_sessions[task_id].finalize_upload()
+        await upload_sessions[task_id].finalize_upload()
 
     except Exception as e:
         js.logToTaskWindow(task_id, f"❌ [Python] ERROR during finalization: {str(e)}")
-        traceback.print_exc()
+        # Don't print the full traceback for the expected timeout error, just the message.
+        if "Finalization timed out" not in str(e):
+            traceback.print_exc()
         raise e
     finally:
         # Clean up session to free memory, regardless of success or failure
